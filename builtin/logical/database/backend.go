@@ -222,6 +222,54 @@ func (b *databaseBackend) invalidate(ctx context.Context, key string) {
 	}
 }
 
+func (b *databaseBackend) GetConnectionForConfig(ctx context.Context, name string,
+	config *DatabaseConfig) (*dbPluginInstance, error) {
+
+	b.RLock()
+	unlockFunc := b.RUnlock
+	defer func() { unlockFunc() }()
+
+	db, ok := b.connections[name]
+	if ok {
+		return db, nil
+	}
+
+	// Upgrade lock
+	b.RUnlock()
+	b.Lock()
+	unlockFunc = b.Unlock
+
+	db, ok = b.connections[name]
+	if ok {
+		return db, nil
+	}
+
+	dbp, err := dbplugin.PluginFactory(ctx, config.PluginName, b.System(), b.logger)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = dbp.Init(ctx, config.ConnectionDetails, true)
+	if err != nil {
+		dbp.Close()
+		return nil, err
+	}
+
+	id, err := uuid.GenerateUUID()
+	if err != nil {
+		return nil, err
+	}
+
+	db = &dbPluginInstance{
+		Database: dbp,
+		name:     name,
+		id:       id,
+	}
+
+	b.connections[name] = db
+	return db, nil
+}
+
 func (b *databaseBackend) GetConnection(ctx context.Context, s logical.Storage, name string) (*dbPluginInstance, error) {
 	b.RLock()
 	unlockFunc := b.RUnlock

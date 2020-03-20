@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"github.com/hashicorp/vault/sdk/database/dbplugin"
 	"time"
 
 	"github.com/hashicorp/vault/sdk/framework"
@@ -74,11 +75,11 @@ func (b *databaseBackend) pathRotateCredentialsUpdate() framework.OperationFunc 
 
 		// Take out the backend lock since we are swapping out the connection
 		b.Lock()
-		defer b.Unlock()
+		//defer b.Unlock()
 
 		// Take the write lock on the instance
 		db.Lock()
-		defer db.Unlock()
+		//defer db.Unlock()
 
 		connectionDetails, err := db.RotateRootCredentials(ctx, config.RootCredentialsRotateStatements)
 		if err != nil {
@@ -90,8 +91,40 @@ func (b *databaseBackend) pathRotateCredentialsUpdate() framework.OperationFunc 
 		if err != nil {
 			return nil, err
 		}
+
 		if err := req.Storage.Put(ctx, entry); err != nil {
-			return nil, err
+			putErr := err
+
+			// Close the plugin
+			db.closed = true
+			if err := db.Database.Close(); err != nil {
+				b.Logger().Error("error closing the database plugin connection", "err", err)
+			}
+			// Even on error, still remove the connection
+			delete(b.connections, name)
+			db.Unlock()
+			b.Unlock()
+
+			ndbc, err := b.GetConnectionForConfig(ctx, name, config)
+			if err != nil {
+				return nil, err
+			}
+			b.Lock()
+			defer b.Unlock()
+			ndbc.Lock()
+			defer ndbc.Unlock()
+			_, _, err = ndbc.SetCredentials(ctx, dbplugin.Statements{}, dbplugin.StaticUserConfig{
+				Username: "root",
+				Password: "root",
+			})
+			ndbc.closed = true
+			if err := ndbc.Database.Close(); err != nil {
+				b.Logger().Error("error closing the database plugin connection", "err", err)
+			}
+			// Even on error, still remove the connection
+			delete(b.connections, name)
+
+			return nil, putErr
 		}
 
 		// Close the plugin
