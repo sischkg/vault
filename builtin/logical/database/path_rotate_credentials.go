@@ -68,18 +68,16 @@ func (b *databaseBackend) pathRotateCredentialsUpdate() framework.OperationFunc 
 			return nil, err
 		}
 
+		// Prepare static user config in event of needing to roll back the rotated password
+		userConfig := dbplugin.StaticUserConfig{
+			Username: config.ConnectionDetails["username"].(string),
+			Password: config.ConnectionDetails["password"].(string),
+		}
+
 		db, err := b.GetConnection(ctx, req.Storage, name)
 		if err != nil {
 			return nil, err
 		}
-
-		// Take out the backend lock since we are swapping out the connection
-		b.Lock()
-		//defer b.Unlock()
-
-		// Take the write lock on the instance
-		db.Lock()
-		//defer db.Unlock()
 
 		connectionDetails, err := db.RotateRootCredentials(ctx, config.RootCredentialsRotateStatements)
 		if err != nil {
@@ -92,52 +90,46 @@ func (b *databaseBackend) pathRotateCredentialsUpdate() framework.OperationFunc 
 			return nil, err
 		}
 
-		if err := req.Storage.Put(ctx, entry); err != nil {
-			putErr := err
+		if putErr := req.Storage.Put(ctx, entry); putErr != nil {
+			// Root credentials have been rotated and storage put has failed
+			// Roll back rotation of credentials to original to avoid database lockout
 
-			// Close the plugin
-			db.closed = true
-			if err := db.Database.Close(); err != nil {
+			// Clear the current connection
+			if err := b.ClearConnection(name); err != nil {
 				b.Logger().Error("error closing the database plugin connection", "err", err)
+				return nil, err
 			}
-			// Even on error, still remove the connection
-			delete(b.connections, name)
-			db.Unlock()
-			b.Unlock()
 
-			ndbc, err := b.GetConnectionForConfig(ctx, name, config)
+			// Get a new connection using the new configuration with newly rotated password
+			dbc, err := b.GetConnectionForConfig(ctx, name, config)
 			if err != nil {
 				return nil, err
 			}
-			b.Lock()
-			defer b.Unlock()
-			ndbc.Lock()
-			defer ndbc.Unlock()
-			_, _, err = ndbc.SetCredentials(ctx, dbplugin.Statements{}, dbplugin.StaticUserConfig{
-				Username: "root",
-				Password: "root",
-			})
-			ndbc.closed = true
-			if err := ndbc.Database.Close(); err != nil {
-				b.Logger().Error("error closing the database plugin connection", "err", err)
+
+			// Roll back password to that before the rotation
+			_, _, err = dbc.SetCredentials(ctx, dbplugin.Statements{}, userConfig)
+			if err != nil {
+				return nil, err
 			}
-			// Even on error, still remove the connection
-			delete(b.connections, name)
+
+			// Close the plugin
+			if err := b.ClearConnection(name); err != nil {
+				b.Logger().Error("error closing the database plugin connection", "err", err)
+				return nil, err
+			}
 
 			return nil, putErr
 		}
 
 		// Close the plugin
-		db.closed = true
-		if err := db.Database.Close(); err != nil {
+		if err := b.ClearConnection(name); err != nil {
 			b.Logger().Error("error closing the database plugin connection", "err", err)
 		}
-		// Even on error, still remove the connection
-		delete(b.connections, name)
 
 		return nil, nil
 	}
 }
+
 func (b *databaseBackend) pathRotateRoleCredentialsUpdate() framework.OperationFunc {
 	return func(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 		name := data.Get("name").(string)
