@@ -59,6 +59,7 @@ type SSHVerifyResponse struct {
 // SSHHelperConfig is a structure which represents the entries from the vault-ssh-helper's configuration file.
 type SSHHelperConfig struct {
 	VaultAddr       string `hcl:"vault_addr"`
+	Namespace       string `hcl:"namespace"`
 	SSHMountPoint   string `hcl:"ssh_mount_point"`
 	CACert          string `hcl:"ca_cert"`
 	CAPath          string `hcl:"ca_path"`
@@ -123,6 +124,11 @@ func (c *SSHHelperConfig) NewClient() (*Client, error) {
 		return nil, err
 	}
 
+	// namespace specified in config file
+	if c.Namespace != "" {
+	        client.setNamespace( c.Namespace )
+	}
+
 	return client, nil
 }
 
@@ -154,6 +160,7 @@ func ParseSSHHelperConfig(contents string) (*SSHHelperConfig, error) {
 
 	valid := []string{
 		"vault_addr",
+		"namespace",
 		"ssh_mount_point",
 		"ca_cert",
 		"ca_path",
